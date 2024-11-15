@@ -1,0 +1,11 @@
+[package]
+name = "munch-nar"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+nix-compat = { git = "https://code.tvl.fyi/depot.git:workspace=views/tvix.git" }
+reqwest = { version = "0.11", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
