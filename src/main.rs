@@ -239,7 +239,7 @@ fn parse_nix_store_path(input: &str) -> IResult<&str, NixStorePath> {
             full_path: input.to_string(),
             store_path: store_path.to_string(),
             hash: hash.to_string(),
-            file_path: file_path.map(|s| s.to_string()),
+            file_path: file_path.map(|s| s.trim_end_matches("/").to_string()),
         },
     ))
 }
