@@ -1,5 +1,11 @@
 use anyhow::Result;
-use axum::{extract::Path, http::StatusCode, response::IntoResponse, routing::get, Router};
+use axum::{
+    extract::Path,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::get,
+    Router,
+};
 use clap::{Parser, Subcommand};
 use futures::TryStreamExt;
 use nix_compat::nar::reader::r#async as nar_reader;
@@ -124,11 +130,18 @@ async fn handle_request(
                 }
             });
 
-            (StatusCode::OK, axum::body::Body::from_stream(stream)).into_response()
+            info!("Streaming response");
+
+            Response::builder()
+                .status(StatusCode::OK)
+                .body(axum::body::Body::from_stream(stream))
+                .unwrap()
         }
     }
 }
 
+// TODO: support symlinks pointing to other NARs
+// Support directories
 #[instrument(skip(node, tx))]
 async fn search_nar<'a, 'r: 'a>(
     node: nar_reader::Node<'a, 'r>,
@@ -148,7 +161,7 @@ async fn search_nar<'a, 'r: 'a>(
             debug!("Searching directory: {}", dir_name);
 
             while let Some(entry) = dir_reader.next().await? {
-                info!("Entry: {:?}", std::str::from_utf8(&entry.name).unwrap());
+                debug!("Entry: {:?}", std::str::from_utf8(&entry.name).unwrap());
                 match entry.node {
                     nar_reader::Node::File { reader, .. } => {
                         stream_file(reader, tx.clone(), entry.name == remaining_path.as_bytes())
