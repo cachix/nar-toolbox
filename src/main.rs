@@ -1,19 +1,15 @@
-use anyhow::{Context, Result};
-use axum::{
-    extract::Path,
-    http::{HeaderMap, HeaderValue, StatusCode},
-    response::IntoResponse,
-    routing::get,
-    Router,
-};
+use anyhow::Result;
+use axum::{extract::Path, http::StatusCode, response::IntoResponse, routing::get, Router};
 use clap::{Parser, Subcommand};
-use futures::{stream::BoxStream, TryStreamExt};
+use futures::TryStreamExt;
 use nix_compat::nar::reader::r#async as nar_reader;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{self, AsyncRead, AsyncReadExt};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, instrument};
+
+static BUFFER_SIZE: usize = 8192;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -38,6 +34,7 @@ async fn main() -> Result<()> {
     }
 }
 
+#[instrument]
 async fn serve(store_uri: String) -> Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     let store_uri = Arc::new(store_uri);
@@ -54,117 +51,85 @@ async fn serve(store_uri: String) -> Result<()> {
     Ok(())
 }
 
+#[instrument]
 async fn handle_request(
     Path(path): Path<String>,
     axum::extract::State(store_uri): axum::extract::State<Arc<String>>,
 ) -> impl IntoResponse {
-    if let Some(store_path) = NixStorePath::parse(&path) {
-        let uri = format!("{}/{}.narinfo", store_uri, store_path.hash);
-        info!("Fetching narinfo from {}", uri);
-        let raw_narinfo = reqwest::get(uri).await.unwrap().text().await.unwrap();
-        let narinfo = nix_compat::narinfo::NarInfo::parse(&raw_narinfo).unwrap();
+    match NixStorePath::parse(&path) {
+        None => (StatusCode::NOT_FOUND, "Not found").into_response(),
+        Some(store_path) => {
+            let uri = format!("{}/{}.narinfo", store_uri, store_path.hash);
+            info!("Fetching narinfo from {}", uri);
+            let raw_narinfo = reqwest::get(uri).await.unwrap().text().await.unwrap();
+            let narinfo = nix_compat::narinfo::NarInfo::parse(&raw_narinfo).unwrap();
 
-        let nar_path = narinfo.url;
-        let nar_url = format!("{}/{}", store_uri, nar_path);
-        info!("Redirecting to {}", nar_url);
+            let nar_path = narinfo.url;
+            let nar_url = format!("{}/{}", store_uri, nar_path);
+            info!("Redirecting to {}", nar_url);
 
-        let client = reqwest::Client::new();
-        let nar_resp = match client.get(&nar_url).send().await {
-            Ok(resp) => resp,
-            Err(_) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch NAR").into_response()
+            let client = reqwest::Client::new();
+            let nar_resp = match client.get(&nar_url).send().await {
+                Ok(resp) => resp,
+                Err(_) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch NAR")
+                        .into_response()
+                }
+            };
+
+            if !nar_resp.status().is_success() {
+                return (StatusCode::BAD_GATEWAY, "Failed to fetch NAR").into_response();
             }
-        };
 
-        if !nar_resp.status().is_success() {
-            return (StatusCode::BAD_GATEWAY, "Failed to fetch NAR").into_response();
+            let s = nar_resp.bytes_stream().map_err(|e| {
+                let e = e.without_url();
+                error!(e=%e, "Failed to get NAR body");
+                io::Error::new(io::ErrorKind::BrokenPipe, e.to_string())
+            });
+            let r = tokio_util::io::StreamReader::new(s);
+
+            let r: Box<dyn AsyncRead + Send + Unpin> = match narinfo.compression {
+                None => Box::new(r),
+                Some("bzip2") => Box::new(async_compression::tokio::bufread::BzDecoder::new(r)),
+                Some("gzip") => Box::new(async_compression::tokio::bufread::GzipDecoder::new(r)),
+                Some("xz") => Box::new(async_compression::tokio::bufread::XzDecoder::new(r)),
+                Some("zstd") => Box::new(async_compression::tokio::bufread::ZstdDecoder::new(r)),
+                Some(comp_str) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Unsupported compression: {comp_str}"),
+                    )
+                        .into_response();
+                }
+            };
+
+            let mut r = io::BufReader::new(r);
+
+            let (tx, rx) = mpsc::channel(BUFFER_SIZE);
+
+            let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+            let target_path = store_path
+                .file_path
+                .map(|s| format!("/{}", s))
+                .unwrap_or("/".to_string());
+
+            info!("Searching for: {:?}", target_path);
+
+            tokio::spawn(async move {
+                let root_node = nar_reader::open(&mut r).await.unwrap();
+
+                if let Err(err) = search_nar(root_node, target_path, tx).await {
+                    error!(e=%err, "Failed to search NAR");
+                }
+            });
+
+            (StatusCode::OK, axum::body::Body::from_stream(stream)).into_response()
         }
-
-        let s = nar_resp.bytes_stream().map_err(|e| {
-            let e = e.without_url();
-            error!(e=%e, "Failed to get NAR body");
-            io::Error::new(io::ErrorKind::BrokenPipe, e.to_string())
-        });
-        let r = tokio_util::io::StreamReader::new(s);
-
-        let r: Box<dyn AsyncRead + Send + Unpin> = match narinfo.compression {
-            None => Box::new(r) as Box<dyn AsyncRead + Send + Unpin>,
-            Some("bzip2") => Box::new(async_compression::tokio::bufread::BzDecoder::new(r))
-                as Box<dyn AsyncRead + Send + Unpin>,
-            Some("gzip") => Box::new(async_compression::tokio::bufread::GzipDecoder::new(r))
-                as Box<dyn AsyncRead + Send + Unpin>,
-            Some("xz") => Box::new(async_compression::tokio::bufread::XzDecoder::new(r))
-                as Box<dyn AsyncRead + Send + Unpin>,
-            Some("zstd") => Box::new(async_compression::tokio::bufread::ZstdDecoder::new(r))
-                as Box<dyn AsyncRead + Send + Unpin>,
-            Some(comp_str) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("unsupported compression: {comp_str}"),
-                )
-                    .into_response();
-            }
-        };
-
-        let mut r = io::BufReader::new(r);
-        let root_node = nar_reader::open(&mut r).await.unwrap();
-
-        // match root_node {
-        //     nar_reader::Node::Directory (mut dir_reader) => {
-        //         info!("Root node is a directory");
-        //         if let Some(entry) = dir_reader.next().await.unwrap() {
-        //             info!("File name: {:?}", std::str::from_utf8(&entry.name).unwrap());
-
-        //             if let nar_reader::Node::File { executable, mut reader } = entry.node {
-        //                 let mut buf = vec![0; 1024];
-        //                 reader.read(&mut buf).await.unwrap();
-        //                 info!("Root node is a file");
-        //                 info!("File contents: {:?}", std::str::from_utf8(&buf).unwrap());
-        //             }
-        //         }
-        //     },
-        //     nar_reader::Node::File { executable, reader } => {
-        //         info!("Root node is a file");
-        //     }
-        //     nar_reader::Node::Symlink { target } => {
-        //         info!("Root node is a symlink");
-        //     }
-        // }
-
-        let target_path = String::from("/install");
-
-        let (tx, rx) = mpsc::channel(8096);
-
-        if let Err(err) = search_nar(root_node, target_path, tx).await {
-            error!(e=%err, "Failed to search NAR");
-        }
-
-        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-
-        (StatusCode::OK, axum::body::Body::from_stream(stream)).into_response()
-
-        //     Ok(Some(file_reader)) => {
-        //         // let stream = tokio_util::io::ReaderStream::new(file_reader);
-        //         (StatusCode::OK, "stream").into_response()
-        //     }
-        //     Ok(None) => {
-        //         (StatusCode::NOT_FOUND, "File not found in NAR").into_response()
-        //     },
-        //     Err(e) => {
-        //         error!(e=%e, "Failed to search NAR");
-        //         (StatusCode::INTERNAL_SERVER_ERROR, "Failed to search NAR").into_response()
-        //     }
-        // }
-
-        // let mut headers = HeaderMap::new();
-        // headers.insert(axum::http::header::LOCATION, HeaderValue::from_str(&nar_url).unwrap());
-
-        // (StatusCode::FOUND, headers, "").into_response()
-    } else {
-        (StatusCode::NOT_FOUND, "Not found").into_response()
     }
 }
 
+#[instrument(skip(node, tx))]
 async fn search_nar<'a, 'r: 'a>(
     node: nar_reader::Node<'a, 'r>,
     target_path: String,
@@ -186,7 +151,8 @@ async fn search_nar<'a, 'r: 'a>(
                 info!("Entry: {:?}", std::str::from_utf8(&entry.name).unwrap());
                 match entry.node {
                     nar_reader::Node::File { reader, .. } => {
-                        stream_file(reader, tx.clone(), entry.name == remaining_path.as_bytes()).await;
+                        stream_file(reader, tx.clone(), entry.name == remaining_path.as_bytes())
+                            .await;
                     }
                     nar_reader::Node::Directory(_) => {
                         Box::pin(search_nar(
@@ -204,12 +170,13 @@ async fn search_nar<'a, 'r: 'a>(
     })
 }
 
+#[instrument(skip(reader, tx, should_stream))]
 async fn stream_file(
     mut reader: nar_reader::FileReader<'_, '_>,
     tx: mpsc::Sender<std::result::Result<Vec<u8>, std::io::Error>>,
     should_stream: bool,
 ) {
-    let mut buffer = vec![0u8; 8096];
+    let mut buffer = vec![0u8; BUFFER_SIZE];
 
     loop {
         match reader.read(&mut buffer).await {
