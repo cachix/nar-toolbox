@@ -1168,6 +1168,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nar-toolbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-compression",
+ "axum",
+ "clap",
+ "futures",
+ "http 1.1.0",
+ "nix-compat",
+ "nom",
+ "reqwest",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "native-tls"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1220,26 +1240,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "nix-toolbox"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-compression",
- "axum",
- "clap",
- "futures",
- "http 1.1.0",
- "nix-compat",
- "nom",
- "reqwest",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
