@@ -1,31 +1,40 @@
 use anyhow::{Context, Result};
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Client, Request, Response, Server};
-use clap::{Subcommand, Parser};
-use std::convert::Infallible;
+use axum::{
+    extract::Path,
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::IntoResponse,
+    routing::get,
+    Router,
+};
+use clap::{Parser, Subcommand};
+use futures::{stream::BoxStream, TryStreamExt};
+use nix_compat::nar::reader::r#async as nar_reader;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::io::{self, AsyncRead, AsyncReadExt};
+use tokio::sync::mpsc;
+use tracing::{debug, error, info};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Command
+    command: Command,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    Serve {
-        store_uri: String,
-    }
+    Serve { store_uri: String },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Serve { store_uri } => serve(store_uri).await
+        Command::Serve { store_uri } => serve(store_uri).await,
     }
 }
 
@@ -33,43 +42,190 @@ async fn serve(store_uri: String) -> Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     let store_uri = Arc::new(store_uri);
 
-    let make_svc = make_service_fn(move |_conn| {
-        let store_uri = Arc::clone(&store_uri);
-        async move {
-            Ok::<_, Infallible>(service_fn(move |req| {
-                let store_uri = Arc::clone(&store_uri);
-                let (parts, _body) = req.into_parts();
-                let uri = parts.uri.clone();
-                async move {
-                    handle_request(store_uri, uri).await
-                }
-            }))
-        }
-    });
+    let app = Router::new()
+        .route("/*path", get(handle_request))
+        .with_state(store_uri);
 
-    let server = Server::bind(&addr).serve(make_svc);
+    info!("Listening on http://{}", addr);
 
-    eprintln!("Listening on http://{}", addr);
-
-    server.await.context("Server error")?;
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
 
     Ok(())
 }
 
 async fn handle_request(
-    store_uri: Arc<String>,
-    uri: hyper::Uri,
-) -> Result<Response<Body>, Infallible> {
-    if let Some(store_path) = NixStorePath::parse(uri.path()) {
-        let narinfo = fetch_narinfo(store_uri, &store_path.hash).await.unwrap();
-        let nar_url = narinfo.borrow_narinfo().url;
-        eprintln!("Redirecting to {}", nar_url);
-        Ok(Response::builder().status(200).body(Body::from(format!("{}",narinfo.borrow_narinfo()))).unwrap())
+    Path(path): Path<String>,
+    axum::extract::State(store_uri): axum::extract::State<Arc<String>>,
+) -> impl IntoResponse {
+    if let Some(store_path) = NixStorePath::parse(&path) {
+        let uri = format!("{}/{}.narinfo", store_uri, store_path.hash);
+        info!("Fetching narinfo from {}", uri);
+        let raw_narinfo = reqwest::get(uri).await.unwrap().text().await.unwrap();
+        let narinfo = nix_compat::narinfo::NarInfo::parse(&raw_narinfo).unwrap();
+
+        let nar_path = narinfo.url;
+        let nar_url = format!("{}/{}", store_uri, nar_path);
+        info!("Redirecting to {}", nar_url);
+
+        let client = reqwest::Client::new();
+        let nar_resp = match client.get(&nar_url).send().await {
+            Ok(resp) => resp,
+            Err(_) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch NAR").into_response()
+            }
+        };
+
+        if !nar_resp.status().is_success() {
+            return (StatusCode::BAD_GATEWAY, "Failed to fetch NAR").into_response();
+        }
+
+        let s = nar_resp.bytes_stream().map_err(|e| {
+            let e = e.without_url();
+            error!(e=%e, "Failed to get NAR body");
+            io::Error::new(io::ErrorKind::BrokenPipe, e.to_string())
+        });
+        let r = tokio_util::io::StreamReader::new(s);
+
+        let r: Box<dyn AsyncRead + Send + Unpin> = match narinfo.compression {
+            None => Box::new(r) as Box<dyn AsyncRead + Send + Unpin>,
+            Some("bzip2") => Box::new(async_compression::tokio::bufread::BzDecoder::new(r))
+                as Box<dyn AsyncRead + Send + Unpin>,
+            Some("gzip") => Box::new(async_compression::tokio::bufread::GzipDecoder::new(r))
+                as Box<dyn AsyncRead + Send + Unpin>,
+            Some("xz") => Box::new(async_compression::tokio::bufread::XzDecoder::new(r))
+                as Box<dyn AsyncRead + Send + Unpin>,
+            Some("zstd") => Box::new(async_compression::tokio::bufread::ZstdDecoder::new(r))
+                as Box<dyn AsyncRead + Send + Unpin>,
+            Some(comp_str) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("unsupported compression: {comp_str}"),
+                )
+                    .into_response();
+            }
+        };
+
+        let mut r = io::BufReader::new(r);
+        let root_node = nar_reader::open(&mut r).await.unwrap();
+
+        // match root_node {
+        //     nar_reader::Node::Directory (mut dir_reader) => {
+        //         info!("Root node is a directory");
+        //         if let Some(entry) = dir_reader.next().await.unwrap() {
+        //             info!("File name: {:?}", std::str::from_utf8(&entry.name).unwrap());
+
+        //             if let nar_reader::Node::File { executable, mut reader } = entry.node {
+        //                 let mut buf = vec![0; 1024];
+        //                 reader.read(&mut buf).await.unwrap();
+        //                 info!("Root node is a file");
+        //                 info!("File contents: {:?}", std::str::from_utf8(&buf).unwrap());
+        //             }
+        //         }
+        //     },
+        //     nar_reader::Node::File { executable, reader } => {
+        //         info!("Root node is a file");
+        //     }
+        //     nar_reader::Node::Symlink { target } => {
+        //         info!("Root node is a symlink");
+        //     }
+        // }
+
+        let target_path = String::from("/install");
+
+        let (tx, rx) = mpsc::channel(8096);
+
+        if let Err(err) = search_nar(root_node, target_path, tx).await {
+            error!(e=%err, "Failed to search NAR");
+        }
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        (StatusCode::OK, axum::body::Body::from_stream(stream)).into_response()
+
+        //     Ok(Some(file_reader)) => {
+        //         // let stream = tokio_util::io::ReaderStream::new(file_reader);
+        //         (StatusCode::OK, "stream").into_response()
+        //     }
+        //     Ok(None) => {
+        //         (StatusCode::NOT_FOUND, "File not found in NAR").into_response()
+        //     },
+        //     Err(e) => {
+        //         error!(e=%e, "Failed to search NAR");
+        //         (StatusCode::INTERNAL_SERVER_ERROR, "Failed to search NAR").into_response()
+        //     }
+        // }
+
+        // let mut headers = HeaderMap::new();
+        // headers.insert(axum::http::header::LOCATION, HeaderValue::from_str(&nar_url).unwrap());
+
+        // (StatusCode::FOUND, headers, "").into_response()
     } else {
-        Ok(Response::builder()
-            .status(404)
-            .body(Body::from("Not Found"))
-            .unwrap())
+        (StatusCode::NOT_FOUND, "Not found").into_response()
+    }
+}
+
+async fn search_nar<'a, 'r: 'a>(
+    node: nar_reader::Node<'a, 'r>,
+    target_path: String,
+    tx: mpsc::Sender<std::result::Result<Vec<u8>, std::io::Error>>,
+) -> Result<()> {
+    Ok(match node {
+        nar_reader::Node::File { reader, .. } => {
+            stream_file(reader, tx.clone(), true).await;
+        }
+        nar_reader::Node::Directory(mut dir_reader) => {
+            let (dir_name, remaining_path) = match target_path.split_once('/') {
+                Some((dir, rest)) => (dir.to_string(), rest.to_string()),
+                None => (target_path, String::new()),
+            };
+
+            debug!("Searching directory: {}", dir_name);
+
+            while let Some(entry) = dir_reader.next().await? {
+                info!("Entry: {:?}", std::str::from_utf8(&entry.name).unwrap());
+                match entry.node {
+                    nar_reader::Node::File { reader, .. } => {
+                        stream_file(reader, tx.clone(), entry.name == remaining_path.as_bytes()).await;
+                    }
+                    nar_reader::Node::Directory(_) => {
+                        Box::pin(search_nar(
+                            entry.node,
+                            remaining_path.to_string(),
+                            tx.clone(),
+                        ))
+                        .await?;
+                    }
+                    _ => (),
+                }
+            }
+        }
+        _ => (),
+    })
+}
+
+async fn stream_file(
+    mut reader: nar_reader::FileReader<'_, '_>,
+    tx: mpsc::Sender<std::result::Result<Vec<u8>, std::io::Error>>,
+    should_stream: bool,
+) {
+    let mut buffer = vec![0u8; 8096];
+
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(n) => {
+                if should_stream {
+                    if tx.send(Ok(buffer[..n].to_vec())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                error!(e=%e, "Failed to read from file");
+                break;
+            }
+        }
     }
 }
 
@@ -77,7 +233,7 @@ struct NixStorePath {
     full_path: String,
     store_path: String,
     hash: String,
-    file_path: Option<String>
+    file_path: Option<String>,
 }
 
 use nom::{
@@ -90,7 +246,7 @@ use nom::{
 
 fn parse_nix_store_path(input: &str) -> IResult<&str, NixStorePath> {
     let (remaining, (_, store_path, file_path)) = tuple((
-        tag("/nix/store/"),
+        tag("nix/store/"),
         take_while1(|c: char| c != '/'),
         opt(preceded(char('/'), rest)),
     ))(input)?;
@@ -115,31 +271,6 @@ impl<'a> NixStorePath {
             Err(_) => None,
         }
     }
-}
-
-use ouroboros::self_referencing;
-#[self_referencing]
-struct OwnedNarInfo {
-    raw: String,
-    #[borrows(raw)]
-    #[covariant]
-    narinfo: nix_compat::narinfo::NarInfo<'this>,
-}
-
-async fn fetch_narinfo<'a>(store_uri: Arc<String>, hash: &str) -> Result<OwnedNarInfo> {
-    let uri = format!("{}/{}.narinfo", store_uri, hash);
-    eprintln!("Fetching narinfo from {}", uri);
-    let narinfo = reqwest::get(uri)
-        .await?
-        .text()
-        .await
-        .map(|raw| OwnedNarInfoBuilder {
-            raw,
-            narinfo_builder: |raw: &String| {
-                nix_compat::narinfo::NarInfo::parse(raw).unwrap()
-            },
-        }.build())?;
-    Ok(narinfo)
 }
 
 #[cfg(test)]
