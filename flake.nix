@@ -54,13 +54,33 @@
 
           craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
 
-          nar-toolbox = craneLib.buildPackage {
-            src = craneLib.cleanCargoSource ./.;
-            strictDeps = true;
+          package =
+            { openssl
+            , libiconv
+            , lib
+            , pkg-config
+            , stdenv
+            }:
+            craneLib.buildPackage {
+              src = craneLib.cleanCargoSource ./.;
+              strictDeps = true;
 
-            CARGO_BUILD_TARGET = target;
-            CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
-          };
+              nativeBuildInputs = [
+                pkg-config
+              ] ++ lib.optionals stdenv.buildPlatform.isDarwin [
+                libiconv
+              ];
+
+              buildInputs = [
+                openssl
+              ];
+
+              CARGO_BUILD_TARGET = target;
+              "CARGO_TARGET_${builtins.replaceStrings ["-"] ["_"] (lib.toUpper target)}_LINKER" = "${stdenv.cc.targetPrefix}cc";
+              CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
+            };
+
+          nar-toolbox = pkgs.callPackage package {};
         in ((lib.optionalAttrs (localSystem == crossSystem) {
           inherit nar-toolbox;
           default = nar-toolbox;
