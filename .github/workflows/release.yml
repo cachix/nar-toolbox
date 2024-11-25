@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch x86_64-linux binary
+        uses: actions/cache/restore@v4
+        with:
+          key: nar-toolbox-x86_64-linux-${{ github.sha }}
+
+      - run: mv ./nar-toolbox ./builds/nar-toolbox-x86_64-linux
+
+      - name: Fetch x86_64-darwin binary
+        uses: actions/cache/restore@v4
+        with:
+          key: nar-toolbox-x86_64-darwin-${{ github.sha }}
+
+      - run: mv ./nar-toolbox ./builds/nar-toolbox-x86_64-darwin
+
+      - name: Fetch aarch64-linux binary
+        uses: actions/cache/restore@v4
+        with:
+          key: nar-toolbox-aarch64-linux-${{ github.sha }}
+
+      - run: mv ./nar-toolbox ./builds/nar-toolbox-aarch64-linux
+
+      - name: Fetch aarch64-darwin binary
+        uses: actions/cache/restore@v4
+        with:
+          key: nar-toolbox-aarch64-darwin-${{ github.sha }}
+
+      - run: mv ./nar-toolbox ./builds/nar-toolbox-aarch64-darwin
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: true
+          fail_on_unmatched_files: true
+          files: |
+            builds/**
