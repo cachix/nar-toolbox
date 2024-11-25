@@ -35,7 +35,7 @@ jobs:
         uses: cachix/install-nix-action@v30
       - name: Build
         run: |
-          nix build -L .#packages.x86_64-linux.cross-aarch64-linux.nar-toolbox
+          nix build -L .#packages.x86_64-linux.cross-aarch64-linux-nar-toolbox
 
       - name: Upload artifact
         uses: actions/upload-artifact@v3
