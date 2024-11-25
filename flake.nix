@@ -80,7 +80,7 @@
               CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
             };
 
-          nar-toolbox = pkgs.callPackage package {};
+          nar-toolbox = pkgs.callPackage package { openssl = pkgs.pkgsStatic.openssl; };
         in ((lib.optionalAttrs (localSystem == crossSystem) {
           inherit nar-toolbox;
           default = nar-toolbox;
