@@ -214,8 +214,6 @@ async fn stream_file(
 }
 
 struct NixStorePath {
-    full_path: String,
-    store_path: String,
     hash: String,
     file_path: Option<String>,
 }
@@ -225,10 +223,18 @@ use nom::{
     character::complete::char,
     combinator::{opt, recognize, rest},
     sequence::{pair, preceded, tuple},
+    branch::alt,
     IResult,
 };
 
 fn parse_nix_store_path(input: &str) -> IResult<&str, NixStorePath> {
+    alt((
+        parse_full_nix_store_path,
+        parse_hash_only_path
+    ))(input)
+}
+
+fn parse_full_nix_store_path(input: &str) -> IResult<&str, NixStorePath> {
     let (remaining, (store_path, file_path)) = tuple((
         recognize(pair(
             opt(char('/')),
@@ -247,8 +253,21 @@ fn parse_nix_store_path(input: &str) -> IResult<&str, NixStorePath> {
     Ok((
         remaining,
         NixStorePath {
-            full_path: input.to_string(),
-            store_path: store_path.to_string(),
+            hash: hash.to_string(),
+            file_path: file_path.map(|s| s.trim_end_matches("/").to_string()),
+        },
+    ))
+}
+
+fn parse_hash_only_path(input: &str) -> IResult<&str, NixStorePath> {
+    let (remaining, (hash, file_path)) = tuple((
+        take(32usize),
+        opt(preceded(char('/'), rest)),
+    ))(input)?;
+
+    Ok((
+        remaining,
+        NixStorePath {
             hash: hash.to_string(),
             file_path: file_path.map(|s| s.trim_end_matches("/").to_string()),
         },
@@ -275,11 +294,6 @@ mod test {
     fn test_parse_store_path() {
         let path = "/nix/store/8h6x8md74j4b4xcy4xd9y4cc210hhaxx-foo";
         let nix_path = NixStorePath::parse(path).unwrap();
-        assert_eq!(nix_path.full_path, path);
-        assert_eq!(
-            nix_path.store_path,
-            "/nix/store/8h6x8md74j4b4xcy4xd9y4cc210hhaxx-foo"
-        );
         assert_eq!(nix_path.hash, "8h6x8md74j4b4xcy4xd9y4cc210hhaxx");
         assert_eq!(nix_path.file_path, None);
     }
@@ -288,12 +302,15 @@ mod test {
     fn test_parse_store_path_with_file_path() {
         let path = "nix/store/8h6x8md74j4b4xcy4xd9y4cc210hhaxx-foo/bin/foo";
         let nix_path = NixStorePath::parse(path).unwrap();
-        assert_eq!(nix_path.full_path, path);
-        assert_eq!(
-            nix_path.store_path,
-            "nix/store/8h6x8md74j4b4xcy4xd9y4cc210hhaxx-foo"
-        );
         assert_eq!(nix_path.hash, "8h6x8md74j4b4xcy4xd9y4cc210hhaxx");
         assert_eq!(nix_path.file_path, Some("bin/foo".to_string()));
+    }
+
+    #[test]
+    fn test_parse_store_path_nar_serve() {
+        let path = "zhpwxx771lz7hdyiv9f611w80wja0vsn/nix-2.26.0pre19700101_838d3c1-aarch64-darwin.tar.xz";
+        let nix_path = NixStorePath::parse(path).unwrap();
+        assert_eq!(nix_path.hash, "zhpwxx771lz7hdyiv9f611w80wja0vsn");
+        assert_eq!(nix_path.file_path, Some("nix-2.26.0pre19700101_838d3c1-aarch64-darwin.tar.xz".to_string()));
     }
 }
