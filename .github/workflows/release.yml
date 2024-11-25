@@ -21,33 +21,37 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           key: nar-toolbox-x86_64-linux-${{ github.sha }}
-          path: nar-toolbox
+          path: result/bin/nar-toolbox
+          fail-on-cache-miss: true
 
-      - run: mv ./nar-toolbox ./builds/nar-toolbox-x86_64-linux
+      - run: mv ./result/bin/nar-toolbox ./builds/nar-toolbox-x86_64-linux
 
       - name: Fetch x86_64-darwin binary
         uses: actions/cache/restore@v4
         with:
           key: nar-toolbox-x86_64-darwin-${{ github.sha }}
-          path: nar-toolbox
+          path: result/bin/nar-toolbox
+          fail-on-cache-miss: true
 
-      - run: mv ./nar-toolbox ./builds/nar-toolbox-x86_64-darwin
+      - run: mv ./result/bin/nar-toolbox ./builds/nar-toolbox-x86_64-darwin
 
       - name: Fetch aarch64-linux binary
         uses: actions/cache/restore@v4
         with:
           key: nar-toolbox-aarch64-linux-${{ github.sha }}
-          path: nar-toolbox
+          path: result/bin/nar-toolbox
+          fail-on-cache-miss: true
 
-      - run: mv ./nar-toolbox ./builds/nar-toolbox-aarch64-linux
+      - run: mv ./result/bin/nar-toolbox ./builds/nar-toolbox-aarch64-linux
 
       - name: Fetch aarch64-darwin binary
         uses: actions/cache/restore@v4
         with:
           key: nar-toolbox-aarch64-darwin-${{ github.sha }}
-          path: nar-toolbox
+          path: result/bin/nar-toolbox
+          fail-on-cache-miss: true
 
-      - run: mv ./nar-toolbox ./builds/nar-toolbox-aarch64-darwin
+      - run: mv ./result/bin/nar-toolbox ./builds/nar-toolbox-aarch64-darwin
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v1
