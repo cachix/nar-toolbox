@@ -56,7 +56,7 @@ jobs:
       - run: mv ./result/bin/nar-toolbox ./builds/nar-toolbox-aarch64-darwin
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           draft: true
           fail_on_unmatched_files: true
