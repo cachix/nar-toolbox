@@ -223,19 +223,26 @@ struct NixStorePath {
 use nom::{
     bytes::complete::{tag, take, take_while1},
     character::complete::char,
-    combinator::{opt, rest},
-    sequence::{preceded, tuple},
+    combinator::{opt, recognize, rest},
+    sequence::{pair, preceded, tuple},
     IResult,
 };
 
 fn parse_nix_store_path(input: &str) -> IResult<&str, NixStorePath> {
-    let (remaining, (_, store_path, file_path)) = tuple((
-        tag("nix/store/"),
-        take_while1(|c: char| c != '/'),
+    let (remaining, (store_path, file_path)) = tuple((
+        recognize(pair(
+            opt(char('/')),
+            pair(tag("nix/store/"), take_while1(|c: char| c != '/')),
+        )),
         opt(preceded(char('/'), rest)),
     ))(input)?;
 
-    let (_, hash) = take(32u8)(store_path)?;
+    let hash = store_path
+        .trim_start_matches('/')
+        .trim_start_matches("nix/store/")
+        .get(..32)
+        .unwrap_or_default()
+        .to_string();
 
     Ok((
         remaining,
@@ -250,9 +257,12 @@ fn parse_nix_store_path(input: &str) -> IResult<&str, NixStorePath> {
 
 impl<'a> NixStorePath {
     fn parse(path: &'a str) -> Option<Self> {
-        match parse_nix_store_path(&path) {
+        match parse_nix_store_path(path) {
             Ok((_, nix_path)) => Some(nix_path),
-            Err(_) => None,
+            Err(err) => {
+                eprintln!("Failed to parse Nix store path: {:?}", err);
+                None
+            }
         }
     }
 }
@@ -264,19 +274,25 @@ mod test {
     #[test]
     fn test_parse_store_path() {
         let path = "/nix/store/8h6x8md74j4b4xcy4xd9y4cc210hhaxx-foo";
-        let nix_path = parse_nix_store_path(path).unwrap().1;
+        let nix_path = NixStorePath::parse(path).unwrap();
         assert_eq!(nix_path.full_path, path);
-        assert_eq!(nix_path.store_path, "8h6x8md74j4b4xcy4xd9y4cc210hhaxx-foo");
+        assert_eq!(
+            nix_path.store_path,
+            "/nix/store/8h6x8md74j4b4xcy4xd9y4cc210hhaxx-foo"
+        );
         assert_eq!(nix_path.hash, "8h6x8md74j4b4xcy4xd9y4cc210hhaxx");
         assert_eq!(nix_path.file_path, None);
     }
 
     #[test]
     fn test_parse_store_path_with_file_path() {
-        let path = "/nix/store/8h6x8md74j4b4xcy4xd9y4cc210hhaxx-foo/bin/foo";
-        let nix_path = parse_nix_store_path(path).unwrap().1;
+        let path = "nix/store/8h6x8md74j4b4xcy4xd9y4cc210hhaxx-foo/bin/foo";
+        let nix_path = NixStorePath::parse(path).unwrap();
         assert_eq!(nix_path.full_path, path);
-        assert_eq!(nix_path.store_path, "8h6x8md74j4b4xcy4xd9y4cc210hhaxx-foo");
+        assert_eq!(
+            nix_path.store_path,
+            "nix/store/8h6x8md74j4b4xcy4xd9y4cc210hhaxx-foo"
+        );
         assert_eq!(nix_path.hash, "8h6x8md74j4b4xcy4xd9y4cc210hhaxx");
         assert_eq!(nix_path.file_path, Some("bin/foo".to_string()));
     }
