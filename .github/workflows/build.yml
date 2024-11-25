@@ -19,11 +19,12 @@ jobs:
         run: |
           nix build -L .#packages.x86_64-linux.nar-toolbox
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Cache build
+        uses: actions/cache/save@v4
+        id: cache
         with:
-          name: nar-toolbox-x86_64-linux
           path: result/bin/nar-toolbox
+          key: nar-toolbox-x86_64-linux-${{ github.sha }}
 
   build-aarch64-linux:
     name: Build aarch64-linux
@@ -37,11 +38,12 @@ jobs:
         run: |
           nix build -L .#packages.x86_64-linux.cross-aarch64-linux-nar-toolbox
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Cache build
+        uses: actions/cache/save@v4
+        id: cache
         with:
-          name: nar-toolbox-aarch64-linux
           path: result/bin/nar-toolbox
+          key: nar-toolbox-aarch64-linux-${{ github.sha }}
 
   build-x86_64-darwin:
     name: Build x86_64-darwin
@@ -55,11 +57,12 @@ jobs:
         run: |
           nix build -L .#packages.aarch64-darwin.cross-x86_64-darwin-nar-toolbox
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Cache build
+        uses: actions/cache/save@v4
+        id: cache
         with:
-          name: nar-toolbox-x86_64-darwin
           path: result/bin/nar-toolbox
+          key: nar-toolbox-x86_64-darwin-${{ github.sha }}
 
   build-aarch64-darwin:
     name: Build aarch64-darwin
@@ -73,8 +76,9 @@ jobs:
         run: |
           nix build -L .#packages.aarch64-darwin.nar-toolbox
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Cache build
+        uses: actions/cache/save@v4
+        id: cache
         with:
-          name: nar-toolbox-aarch64-darwin
           path: result/bin/nar-toolbox
+          key: nar-toolbox-aarch64-darwin-${{ github.sha }}
