@@ -17,6 +17,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - run: mkdir builds
+
       - name: Fetch x86_64-linux binary
         uses: actions/cache/restore@v4
         with:
