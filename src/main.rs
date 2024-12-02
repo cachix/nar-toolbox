@@ -219,19 +219,16 @@ struct NixStorePath {
 }
 
 use nom::{
+    branch::alt,
     bytes::complete::{tag, take, take_while1},
     character::complete::char,
     combinator::{opt, recognize, rest},
     sequence::{pair, preceded, tuple},
-    branch::alt,
     IResult,
 };
 
 fn parse_nix_store_path(input: &str) -> IResult<&str, NixStorePath> {
-    alt((
-        parse_full_nix_store_path,
-        parse_hash_only_path
-    ))(input)
+    alt((parse_full_nix_store_path, parse_hash_only_path))(input)
 }
 
 fn parse_full_nix_store_path(input: &str) -> IResult<&str, NixStorePath> {
@@ -260,10 +257,8 @@ fn parse_full_nix_store_path(input: &str) -> IResult<&str, NixStorePath> {
 }
 
 fn parse_hash_only_path(input: &str) -> IResult<&str, NixStorePath> {
-    let (remaining, (hash, file_path)) = tuple((
-        take(32usize),
-        opt(preceded(char('/'), rest)),
-    ))(input)?;
+    let (remaining, (hash, file_path)) =
+        tuple((take(32usize), opt(preceded(char('/'), rest))))(input)?;
 
     Ok((
         remaining,
@@ -308,9 +303,13 @@ mod test {
 
     #[test]
     fn test_parse_store_path_nar_serve() {
-        let path = "zhpwxx771lz7hdyiv9f611w80wja0vsn/nix-2.26.0pre19700101_838d3c1-aarch64-darwin.tar.xz";
+        let path =
+            "zhpwxx771lz7hdyiv9f611w80wja0vsn/nix-2.26.0pre19700101_838d3c1-aarch64-darwin.tar.xz";
         let nix_path = NixStorePath::parse(path).unwrap();
         assert_eq!(nix_path.hash, "zhpwxx771lz7hdyiv9f611w80wja0vsn");
-        assert_eq!(nix_path.file_path, Some("nix-2.26.0pre19700101_838d3c1-aarch64-darwin.tar.xz".to_string()));
+        assert_eq!(
+            nix_path.file_path,
+            Some("nix-2.26.0pre19700101_838d3c1-aarch64-darwin.tar.xz".to_string())
+        );
     }
 }
