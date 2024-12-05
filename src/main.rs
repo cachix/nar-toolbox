@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tokio::io::{self, AsyncRead, AsyncReadExt};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{filter::LevelFilter, fmt, prelude::*, EnvFilter};
 
 static BUFFER_SIZE: usize = 8192;
 
@@ -33,8 +33,8 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::registry()
-        .with(fmt::layer())
-        .with(EnvFilter::from_default_env())
+        .with(EnvFilter::from_default_env().add_directive(LevelFilter::INFO.into()))
+        .with(fmt::layer().with_writer(std::io::stderr))
         .init();
 
     let cli = Cli::parse();
